@@ -4,17 +4,27 @@
 
 ## Experiment provenance
 
-- Each condition was generated in a fresh, projectless Codex task with no
-  inherited conversation history.
-- The four overall tests were run sequentially. Each task had its own directory
-  and input copy and could not read completed sibling runs.
-- The skill-disabled task could not read any skill. The skill-enabled task could
-  read the skill instructions, while the skill `examples/` directory remained
-  inaccessible during generation.
-- Both correlation conditions received byte-identical workbook content. The
-  artifacts were copied into this example only after the isolated runs finished.
-- The controlled prompt factor was whether `$ultraplot-figures` was explicitly
-  invoked.
+- The four overall plotting conditions in this replacement run were produced by
+  independent agents launched with `fork_turns="none"`; they did not inherit
+  prior conversation turns. This provides content-level isolation.
+- All conditions still shared one host and filesystem. There was no operating-
+  system-level access isolation or low-level file-access audit, so the run was
+  neither OS-hermetic nor fully blind.
+- The skill-disabled condition did not open the skill instructions or supporting
+  skill files. The system skill catalog and its short description remained
+  visible, so this does not establish that the agent could not know the skill
+  existed.
+- The skill-enabled condition used `ultraplot-figures` v1.2.1. It did not read
+  any existing example results or prior skill test results.
+- There is no evidence that a condition read existing test results or another
+  condition's outputs. Cross-condition comparison began only after all four
+  condition results were frozen.
+- During repository integration, only the input path, output directory, and
+  repository output basenames were adapted. Both correlation designs were then
+  rerun unchanged against the same workbook.
+
+These controls support a content-isolated comparison, but not a claim of a
+fully sealed or provably blind experiment.
 
 ## Input data
 
@@ -28,21 +38,16 @@
 
 ## Prompt control
 
-The prompt text below is restored from repository history. The input file is
-shown using its repository-relative path to avoid exposing machine-specific
-information. The full effective prompt for each condition consists of its
-condition-specific instruction plus the common task below.
-
-When the examples were moved to this repository, only the Markdown link target
-for `$ultraplot-figures` was updated to the v1.0.1 permalink; the visible prompt
-wording remains unchanged.
+The prompt below records this replacement run. Machine-specific input and skill
+paths are shown as repository links; this path normalization does not change the
+visible wording or the condition difference.
 
 The common task was:
 
 > Plotting data file: `data/multiple_data.xlsx`
 >
-> Create a publication-ready correlation scatter plot comparing `_0` and `_1`
-> for DNN, GBRT, LR, and SVR across cropland, forest, grassland, and savanna.
+> Compare the relationship between `_0` and `_1` under DNN, GBRT, LR, and SVR
+> for cropland, forest, grassland, and savanna.
 >
 > Provide directly runnable Python code and export PDF and PNG.
 
@@ -50,8 +55,10 @@ Only the plotting instruction changed:
 
 | Condition | Plotting instruction |
 |---|---|
-| Skill enabled | `Use [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.0.1/SKILL.md) to create the plot.` |
-| Skill disabled | `Use UltraPlot to create the plot.` |
+| Skill enabled | `Use [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.2.1/SKILL.md) to create a publication-ready correlation scatter plot.` |
+| Skill disabled | `Use UltraPlot to create a publication-ready correlation scatter plot.` |
+
+The figures were regenerated with UltraPlot 2.6.0 and Matplotlib 3.10.6.
 
 ## Figure comparison
 
@@ -76,6 +83,6 @@ Only the plotting instruction changed:
 | Item | Skill enabled | Skill disabled |
 |---|---:|---:|
 | PDF pages | 1 | 1 |
-| PDF page size | 182.9996 × 184.9787 mm | 191.7302 × 194.5358 mm |
-| PNG dimensions | 7,204 × 7,282 px | 4,529 × 4,595 px |
+| PDF page size | 182.9996 × 178.7169 mm | 161.7767 × 169.0147 mm |
+| PNG dimensions | 7,204 × 7,036 px | 3,821 × 3,992 px |
 | PNG resolution metadata | 999.998 dpi | 599.999 dpi |

@@ -5,18 +5,19 @@
 ## 输入数据
 
 - GeoJSON：[usgs_earthquakes_2025_m5plus.geojson](data/usgs_earthquakes_2025_m5plus.geojson)
-- 原始要素数：2,129
-- 保留地震数：2,128
-- 明确排除：1 条 `properties.type == "landslide"` 的记录
-- 震级范围：M5.0-M8.8；深度范围：3.0-648.298 km
+- 源要素数：2,129
+- 每组实际绘制的有效 Point 要素数：2,129
+- 要素类型：2,128 条记录的 `properties.type == "earthquake"`；1 条记录的
+  `properties.type == "landslide"`
+- 新一轮冻结测试均绘制了所有有效 Point 要素，因此保留了该 landslide 记录；
+  仓库集成阶段没有另行过滤
+- 震级范围：M5.0-M8.8；深度范围：0-648.298 km
 
 ## 提示词控制
 
-以下提示词根据仓库历史恢复。为避免暴露本机信息，输入文件使用仓库相对路径
-表示。每组的完整有效提示词由对应的条件指令与下面的共同任务组成。
-
-示例迁入本仓库时，仅将 `$ultraplot-figures` 的 Markdown 链接目标更新为 v1.0.1
-固定链接，提示词的可见文字未作修改。
+以下输入路径使用仓库相对路径，避免公开本机信息。每组的完整有效提示词由对应
+的条件指令和共同任务组成。重测时使用的本地 skill 链接在此以等价的 v1.2.1
+仓库固定链接表示，提示词的可见文字未改变。
 
 共同任务为：
 
@@ -31,8 +32,24 @@
 
 | 条件 | 绘图指令 |
 |---|---|
-| 使用 skill | `请使用 [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.0.1/SKILL.md) 绘图。` |
+| 使用 skill | `请使用 [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.2.1/SKILL.md) 绘图。` |
 | 不使用 skill | `请使用 UltraPlot 绘图。` |
+
+本次重测使用 UltraPlot 2.6.0、Matplotlib 3.10.6 和 Cartopy 0.25.0；skill
+启用组使用 `ultraplot-figures` v1.2.1。
+
+## 隔离与来源说明
+
+- 生成代理使用 `fork_turns="none"`，没有继承历史对话。提示词内容和生成产物
+  在内容及工作流层面相互隔离。
+- 代理被明确要求不读取已有测试脚本或图件、另一条件的文件，以及 skill 示例
+  中的旧测试结果。目前没有交叉读取的证据。skill 禁用组没有打开 skill 指令
+  或支持文件，但系统 skill 目录及其简短说明仍然可见；skill 启用组使用
+  v1.2.1，且没有使用旧的 skill 示例结果。
+- 两组结果均先冻结，之后才由主流程统一比较。仓库集成阶段仅调整可移植输入
+  路径及既有输出 basename/位置，然后重新执行脚本。
+- 各代理共享同一主机和文件系统，且没有操作系统级访问隔离或文件访问审计。
+  因此这是内容级隔离测试，不是操作系统级密封或完全盲化实验。
 
 ## 图件对比
 
@@ -56,8 +73,9 @@
 
 | 项目 | 使用 skill | 不使用 skill |
 |---|---:|---:|
+| 实际绘制的有效 Point 要素 | 2,129 | 2,129 |
 | PDF 页数 | 1 | 1 |
-| PDF 页面尺寸 | 182.9996 x 116.6052 mm | 348.3003 x 194.2059 mm |
-| PNG 像素尺寸 | 7,204 x 4,590 px | 4,113 x 2,293 px |
+| PDF 页面尺寸 | 182.9996 x 121.6549 mm | 282.3731 x 224.6046 mm |
+| PNG 像素尺寸 | 7,204 x 4,789 px | 3,335 x 2,652 px |
 | PNG 分辨率元数据 | 999.998 dpi | 299.999 dpi |
-| 显示投影 | Plate Carree，中央经线 0 | Robinson，中央经线 0 |
+| 显示投影 | Plate Carree，中央经线 0 | Robinson，中央经线 180 |

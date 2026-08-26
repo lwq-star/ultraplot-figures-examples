@@ -1,157 +1,157 @@
 from __future__ import annotations
 
+import argparse
 import json
-from datetime import UTC, datetime
+import os
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
+gdal_data = Path(sys.prefix) / "Library" / "share" / "gdal"
+if gdal_data.is_dir():
+    os.environ.setdefault("GDAL_DATA", str(gdal_data))
 
 import cartopy.crs as ccrs
 import matplotlib as mpl
 import numpy as np
 import ultraplot as uplt
+from matplotlib import font_manager
+from matplotlib.colors import BoundaryNorm, ListedColormap
 from matplotlib.lines import Line2D
 
 
+DEFAULT_INPUT = (
+    Path(__file__).resolve().parents[1]
+    / "data"
+    / "usgs_earthquakes_2025_m5plus.geojson"
+)
+OUTPUT_BASENAME = "global_earthquakes_2025_m5plus"
 EXPORT_DPI = 1000
-YEAR = 2025
-ROOT = Path(__file__).resolve().parents[1]
-INPUT_PATH = ROOT / "data" / "usgs_earthquakes_2025_m5plus.geojson"
-OUTPUT_STEM = Path(__file__).resolve().parent / "global_earthquakes_2025_m5plus"
+DEPTH_EDGES = np.array([0.0, 70.0, 300.0, 700.0])
 
 
-def load_earthquakes(path: Path) -> tuple[np.ndarray, ...]:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Plot the global distribution of 2025 M5+ earthquakes."
+    )
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path(__file__).resolve().parent
+    )
+    return parser.parse_args()
+
+
+def load_events(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     if not path.is_file():
         raise FileNotFoundError(f"Input GeoJSON not found: {path}")
 
-    collection = json.loads(path.read_text(encoding="utf-8"))
-    if collection.get("type") != "FeatureCollection":
-        raise ValueError("Expected a GeoJSON FeatureCollection.")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("type") != "FeatureCollection" or not payload.get("features"):
+        raise ValueError("Input must be a non-empty GeoJSON FeatureCollection.")
+    if payload.get("crs") is not None:
+        raise ValueError("This script expects RFC 7946 WGS 84 longitude/latitude.")
 
-    rows = []
-    for index, feature in enumerate(collection.get("features", []), start=1):
+    records: list[tuple[float, float, float, float, int]] = []
+    for index, feature in enumerate(payload["features"], start=1):
         geometry = feature.get("geometry") or {}
         properties = feature.get("properties") or {}
         coordinates = geometry.get("coordinates") or []
-        if properties.get("type") != "earthquake":
-            continue
         if geometry.get("type") != "Point" or len(coordinates) < 3:
-            raise ValueError(f"Feature {index} is not a 3D GeoJSON Point.")
-        if properties.get("mag") is None or properties.get("time") is None:
-            raise ValueError(f"Feature {index} lacks magnitude or origin time.")
-        rows.append((*coordinates[:3], properties["mag"], properties["time"]))
+            raise ValueError(f"Feature {index} is not a 3D Point.")
+        try:
+            records.append(
+                (
+                    float(coordinates[0]),
+                    float(coordinates[1]),
+                    float(coordinates[2]),
+                    float(properties["mag"]),
+                    int(properties["time"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Feature {index} has invalid coordinates or fields.") from exc
 
-    if not rows:
-        raise ValueError("The GeoJSON contains no earthquake features.")
-
-    values = np.asarray(rows, dtype=float)
-    if not np.isfinite(values).all():
-        raise ValueError(
-            "Longitude, latitude, depth, magnitude, and time must be finite."
-        )
-
+    values = np.asarray(records, dtype=float)
     longitude, latitude, depth_km, magnitude, time_ms = values.T
-    if np.any((longitude < -180) | (longitude > 180)):
-        raise ValueError("Longitude lies outside the EPSG:4326 range.")
-    if np.any((latitude < -90) | (latitude > 90)):
-        raise ValueError("Latitude lies outside the EPSG:4326 range.")
-    if np.any(depth_km < 0):
-        raise ValueError("Hypocentral depth must be non-negative.")
-    if np.any(magnitude < 5):
-        raise ValueError("The M5+ dataset contains a magnitude below 5.")
+    if not np.isfinite(values).all():
+        raise ValueError("All plotted coordinates, depths, magnitudes, and times must be finite.")
+    if not ((-180 <= longitude).all() and (longitude <= 180).all()):
+        raise ValueError("Longitude must be in [-180, 180] degrees.")
+    if not ((-90 <= latitude).all() and (latitude <= 90).all()):
+        raise ValueError("Latitude must be in [-90, 90] degrees.")
+    if not ((0 <= depth_km).all() and (depth_km < DEPTH_EDGES[-1]).all()):
+        raise ValueError("Depth must be in [0, 700) km for the displayed classes.")
+    if not (magnitude >= 5).all():
+        raise ValueError("The requested dataset must contain only M5+ events.")
 
-    # RFC 7946 GeoJSON positions are longitude/latitude in WGS84; the third
-    # coordinate is interpreted here as USGS hypocentral depth in kilometres.
     years = {
-        datetime.fromtimestamp(timestamp / 1000, tz=UTC).year for timestamp in time_ms
+        datetime.fromtimestamp(timestamp / 1000, timezone.utc).year
+        for timestamp in time_ms
     }
-    if years != {YEAR}:
-        raise ValueError(f"Expected only {YEAR} origin times, found {sorted(years)}.")
+    if years != {2025}:
+        raise ValueError(f"Expected only 2025 UTC timestamps, found years: {sorted(years)}")
 
     return longitude, latitude, depth_km, magnitude
 
 
+def chinese_font_families() -> list[str]:
+    font_path = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / "msyh.ttc"
+    if not font_path.is_file():
+        raise FileNotFoundError("Microsoft YaHei font was not found.")
+    font_manager.fontManager.addfont(font_path)
+    families = list(mpl.rcParams["font.family"])
+    if "Microsoft YaHei" not in families:
+        families.append("Microsoft YaHei")
+    return families
+
+
 def marker_area(magnitude: np.ndarray | float) -> np.ndarray | float:
-    """Return marker area in points squared for the magnitude size encoding."""
-    return 7.0 * np.power(2.0, np.asarray(magnitude) - 5.0)
+    return 6.0 + 8.0 * (np.asarray(magnitude) - 5.0) ** 2
 
 
 def main() -> None:
-    longitude, latitude, depth_km, magnitude = load_earthquakes(INPUT_PATH)
-    draw_order = np.argsort(magnitude, kind="stable")
+    args = parse_args()
+    longitude, latitude, depth_km, magnitude = load_events(args.input)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    magnitude_masks = (
-        (magnitude >= 5) & (magnitude < 6),
-        (magnitude >= 6) & (magnitude < 7),
-        (magnitude >= 7) & (magnitude < 8),
-        magnitude >= 8,
-    )
-    magnitude_counts = np.array([mask.sum() for mask in magnitude_masks])
-    depth_masks = (
-        depth_km < 70,
-        (depth_km >= 70) & (depth_km < 300),
-        depth_km >= 300,
-    )
-    depth_counts = np.array([mask.sum() for mask in depth_masks])
+    depth_colors = mpl.colormaps["viridis"]([0.12, 0.52, 0.90])
+    depth_cmap = ListedColormap(depth_colors, name="earthquake_depth")
+    depth_norm = BoundaryNorm(DEPTH_EDGES, depth_cmap.N, clip=True)
+    draw_order = np.argsort(magnitude)
 
-    style = {
-        "font.size": 8.5,
-        "axes.labelsize": 8.5,
-        "xtick.labelsize": 7.5,
-        "ytick.labelsize": 7.5,
-        "legend.fontsize": 7.5,
-    }
-    with uplt.rc.context(style):
-        fig, axes = uplt.subplots(
+    with uplt.rc.context({"font.family": chinese_font_families()}):
+        fig, axs = uplt.subplots(
             [[1, 1], [2, 3]],
             proj={1: "pcarree"},
             journal="nat2",
             refnum=1,
-            hratios=(2.6, 1.0),
+            hratios=(2.35, 1.0),
             share=False,
             span=False,
-            abc="a.",
-            abcloc="ul",
+            tight=True,
         )
-        map_ax, magnitude_ax, depth_ax = axes
+        ax_map, ax_magnitude, ax_depth = axs
 
-        map_ax.format(
-            lonlim=(-180, 180),
-            latlim=(-90, 90),
-            lonlocator=60,
-            latlocator=30,
-            lonlabels="b",
-            latlabels="l",
-            grid=True,
-            coast=True,
-            land=True,
-            ocean=True,
-            landcolor="#F2F0E9",
-            oceancolor="#EAF2F4",
-            coastcolor="#66645F",
-            coastlinewidth=0.5,
-        )
-
-        points = map_ax.scatter(
+        points = ax_map.scatter(
             longitude[draw_order],
             latitude[draw_order],
-            s=marker_area(magnitude[draw_order]),
             c=depth_km[draw_order],
-            transform=ccrs.PlateCarree(),
-            cmap="viridis",
-            vmin=0,
-            vmax=650,
+            s=marker_area(magnitude[draw_order]),
+            cmap=depth_cmap,
+            norm=depth_norm,
             alpha=0.82,
             edgecolors="white",
-            linewidths=0.18,
-            rasterized=True,
+            linewidths=0.15,
+            transform=ccrs.PlateCarree(),
             zorder=3,
         )
-        map_ax.colorbar(
+        colorbar = ax_map.colorbar(
             points,
             loc="r",
-            label="Hypocentral depth (km)",
-            ticks=(0, 100, 300, 500, 650),
-            length=0.84,
+            label="震源深度 (km)",
+            ticks=DEPTH_EDGES,
         )
+        colorbar.ax.set_yticklabels(["0", "70", "300", "700"])
 
         legend_magnitudes = (5, 6, 7, 8)
         legend_handles = [
@@ -161,100 +161,86 @@ def main() -> None:
                 linestyle="none",
                 marker="o",
                 markersize=float(np.sqrt(marker_area(value))),
-                markerfacecolor="#4D4D4D",
+                markerfacecolor="0.55",
                 markeredgecolor="white",
                 markeredgewidth=0.4,
-                label=f"M{value}",
+                label=f"M {value}",
             )
             for value in legend_magnitudes
         ]
-        map_ax.legend(
-            handles=legend_handles,
-            loc="ll",
-            ncols=4,
-            title="Reported magnitude",
-            frame=True,
-        )
-        map_ax.text(
-            0.985,
-            0.975,
-            rf"{YEAR}  |  $M\geq5$  |  $n={len(magnitude):,}$",
-            transform=map_ax.transAxes,
+        ax_map.legend(handles=legend_handles, loc="ll", ncols=4, title="震级")
+        ax_map.text(
+            0.99,
+            0.98,
+            f"n = {magnitude.size:,}",
+            transform=ax_map.transAxes,
             ha="right",
             va="top",
-            color="#303030",
         )
 
-        magnitude_positions = np.arange(4)
-        magnitude_ax.bar(
-            magnitude_positions,
-            magnitude_counts,
-            width=0.68,
-            color="#D55E00",
-            edgecolor="#6F2F09",
-            linewidth=0.5,
+        magnitude_bins = np.arange(5.0, 9.01, 0.2)
+        ax_magnitude.hist(magnitude, bins=magnitude_bins)
+        median_magnitude = float(np.median(magnitude))
+        ax_magnitude.axvline(median_magnitude, color="0.25", linestyle="--", linewidth=1)
+        ax_magnitude.text(
+            0.97,
+            0.91,
+            f"中位数 {median_magnitude:.1f}",
+            transform=ax_magnitude.transAxes,
+            ha="right",
+            va="top",
         )
-        magnitude_ax.format(
-            xlabel="Reported magnitude class",
-            ylabel="Earthquakes (log scale)",
-            xlim=(-0.65, 3.65),
-            ylim=(0.7, 5000),
+
+        depth_bins = np.arange(0, 701, 25)
+        ax_depth.hist(depth_km, bins=depth_bins)
+        ax_depth.axvline(70, color="0.25", linestyle="--", linewidth=1)
+        ax_depth.axvline(300, color="0.25", linestyle="--", linewidth=1)
+        shallow = np.mean(depth_km < 70) * 100
+        intermediate = np.mean((depth_km >= 70) & (depth_km < 300)) * 100
+        deep = np.mean(depth_km >= 300) * 100
+        ax_depth.text(
+            0.97,
+            0.91,
+            f"浅源 {shallow:.1f}%  中源 {intermediate:.1f}%  深源 {deep:.1f}%",
+            transform=ax_depth.transAxes,
+            ha="right",
+            va="top",
+        )
+
+        axs.format(abc="a.", abcloc="ul")
+        ax_map.format(
+            lonlim=(-180, 180),
+            latlim=(-90, 90),
+            lonlocator=60,
+            latlocator=30,
+            lonlabels="b",
+            latlabels="l",
+            coast=True,
+            grid=True,
+        )
+        ax_magnitude.format(
+            xlabel="震级",
+            ylabel="地震数",
+            xlim=(5, 9),
+            ylim=(0, 1200),
+            xlocator=1,
+            grid=False,
+        )
+        ax_depth.format(
+            xlabel="震源深度 (km)",
+            ylabel="地震数（对数刻度）",
+            xlim=(0, 700),
+            ylim=(0.7, 3000),
+            xlocator=100,
             yscale="log",
-            xticks=magnitude_positions,
-            xticklabels=("5.0-5.9", "6.0-6.9", "7.0-7.9", "8.0+"),
-            yticks=(1, 10, 100, 1000),
             grid=False,
-            ygrid=True,
         )
-        for x_value, count in zip(magnitude_positions, magnitude_counts):
-            magnitude_ax.text(
-                x_value,
-                count * 1.22,
-                f"{count:,}",
-                ha="center",
-                va="bottom",
-                fontsize=7.2,
-                color="#3A2418",
-            )
 
-        depth_positions = np.array([2, 1, 0])
-        depth_midpoints = np.array([35, 185, 475])
-        depth_colors = mpl.colormaps["viridis"](depth_midpoints / 650)
-        depth_ax.barh(
-            depth_positions,
-            depth_counts,
-            color=depth_colors,
-            edgecolor="#454545",
-            linewidth=0.5,
-        )
-        depth_ax.format(
-            xlabel="Earthquakes",
-            xlim=(0, 2250),
-            ylim=(-0.65, 3.25),
-            xticks=(0, 500, 1000, 1500, 2000),
-            yticks=depth_positions,
-            yticklabels=(
-                "Shallow\n<70 km",
-                "Intermediate\n70-299 km",
-                "Deep\n>=300 km",
-            ),
-            grid=False,
-            xgrid=True,
-        )
-        for y_value, count in zip(depth_positions, depth_counts):
-            percent = 100 * count / len(depth_km)
-            depth_ax.text(
-                count + 35,
-                y_value,
-                f"{count:,}  ({percent:.1f}%)",
-                ha="left",
-                va="center",
-                fontsize=7.2,
-                color="#303030",
+        for suffix in ("pdf", "png"):
+            fig.save(
+                args.output_dir / f"{OUTPUT_BASENAME}.{suffix}",
+                dpi=EXPORT_DPI,
             )
-
-        fig.save(OUTPUT_STEM.with_suffix(".pdf"), dpi=EXPORT_DPI)
-        fig.save(OUTPUT_STEM.with_suffix(".png"), dpi=EXPORT_DPI)
 
 
 if __name__ == "__main__":

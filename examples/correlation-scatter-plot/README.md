@@ -14,8 +14,12 @@
   skill files. The system skill catalog and its short description remained
   visible, so this does not establish that the agent could not know the skill
   existed.
-- The skill-enabled condition used `ultraplot-figures` v1.2.1. It did not read
+- The skill-enabled condition used `ultraplot-figures` v1.3.0. It did not read
   any existing example results or prior skill test results.
+- The skill-enabled condition used the operational UltraPlot MCP. The MCP
+  `ultraplot.subplots` source matched the selected `spyder_env` UltraPlot 2.7.0
+  runtime, and task-relevant lookups inspected `PlotAxes.scatter` and
+  `Figure.supxlabel`. The skill-disabled condition did not use UltraPlot MCP.
 - There is no evidence that a condition read existing test results or another
   condition's outputs. Cross-condition comparison began only after all four
   condition results were frozen.
@@ -55,10 +59,10 @@ Only the plotting instruction changed:
 
 | Condition | Plotting instruction |
 |---|---|
-| Skill enabled | `Use [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.2.1/SKILL.md) to create a publication-ready correlation scatter plot.` |
+| Skill enabled | `Use [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.3.0/SKILL.md) to create a publication-ready correlation scatter plot.` |
 | Skill disabled | `Use UltraPlot to create a publication-ready correlation scatter plot.` |
 
-The figures were regenerated with UltraPlot 2.6.0 and Matplotlib 3.10.6.
+The figures were regenerated with UltraPlot 2.7.0 and Matplotlib 3.10.6.
 
 ## Figure comparison
 
@@ -83,6 +87,6 @@ The figures were regenerated with UltraPlot 2.6.0 and Matplotlib 3.10.6.
 | Item | Skill enabled | Skill disabled |
 |---|---:|---:|
 | PDF pages | 1 | 1 |
-| PDF page size | 182.9996 × 178.7169 mm | 161.7767 × 169.0147 mm |
-| PNG dimensions | 7,204 × 7,036 px | 3,821 × 3,992 px |
+| PDF page size | 182.9996 × 179.8458 mm | 186.6900 × 191.7700 mm |
+| PNG dimensions | 7,204 × 7,080 px | 4,410 × 4,530 px |
 | PNG resolution metadata | 999.998 dpi | 599.999 dpi |

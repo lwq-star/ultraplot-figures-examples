@@ -1,286 +1,357 @@
-"""Create a publication-ready 4 x 4 correlation scatter figure with UltraPlot."""
+"""Create a publication-ready 4 x 4 correlation-scatter matrix with UltraPlot."""
 
-import os
+from __future__ import annotations
+
+import argparse
+import string
 from pathlib import Path
-import sys
 
+import matplotlib as mpl
 
-GDAL_DATA_DIR = Path(sys.prefix) / "Library" / "share" / "gdal"
-if GDAL_DATA_DIR.is_dir():
-    os.environ.setdefault("GDAL_DATA", str(GDAL_DATA_DIR))
-
-import matplotlib
-
-matplotlib.use("Agg")
+mpl.use("Agg")
 
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure as MatplotlibFigure
 from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
-from scipy.stats import linregress
 import ultraplot as uplt
 
 
-OUTPUT_DIR = Path(__file__).resolve().parent
-INPUT_FILE = OUTPUT_DIR.parent / "data" / "multiple_data.xlsx"
-PNG_FILE = OUTPUT_DIR / "correlation_scatter_ultraplot.png"
-PDF_FILE = OUTPUT_DIR / "correlation_scatter_ultraplot.pdf"
+DEFAULT_INPUT = (
+    Path(__file__).resolve().parent.parent / "data" / "multiple_data.xlsx"
+)
 
-LAND_COVERS = ("cropland", "forest", "grassland", "savanna")
+LAND_COVERS = (
+    ("cropland", "Cropland"),
+    ("forest", "Forest"),
+    ("grassland", "Grassland"),
+    ("savanna", "Savanna"),
+)
 MODELS = ("DNN", "GBRT", "LR", "SVR")
 MODEL_COLORS = {
     "DNN": "#0072B2",
-    "GBRT": "#009E73",
-    "LR": "#D55E00",
+    "GBRT": "#D55E00",
+    "LR": "#009E73",
     "SVR": "#CC79A7",
 }
 
 
-def load_pairs():
-    """Load and validate all land-cover/model pairs from the workbook."""
-    data = pd.read_excel(INPUT_FILE, sheet_name=0, engine="openpyxl")
-    expected = [
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Plot _0 versus _1 for four land covers and four models."
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DEFAULT_INPUT,
+        help="Input Excel workbook (default: %(default)s).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent,
+        help="Directory for PDF and PNG outputs (default: script directory).",
+    )
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=600,
+        help="PNG resolution in dots per inch (default: %(default)s).",
+    )
+    return parser.parse_args()
+
+
+def required_columns() -> list[str]:
+    return [
         f"{land}{model}_{suffix}"
-        for land in LAND_COVERS
+        for land, _ in LAND_COVERS
         for model in MODELS
         for suffix in (0, 1)
     ]
-    missing = sorted(set(expected).difference(data.columns))
+
+
+def load_data(path: Path) -> pd.DataFrame:
+    if not path.is_file():
+        raise FileNotFoundError(f"Input workbook not found: {path}")
+
+    data = pd.read_excel(path, sheet_name=0)
+    missing = [column for column in required_columns() if column not in data.columns]
     if missing:
-        raise ValueError(f"Workbook is missing required columns: {missing}")
+        raise ValueError("Missing required columns: " + ", ".join(missing))
 
-    pairs = {}
-    for land in LAND_COVERS:
-        for model in MODELS:
-            columns = [f"{land}{model}_0", f"{land}{model}_1"]
-            pair = data.loc[:, columns].apply(pd.to_numeric, errors="coerce").dropna()
-            if len(pair) < 3:
-                raise ValueError(f"Insufficient paired observations for {land} / {model}")
-            pairs[(land, model)] = (
-                pair.iloc[:, 0].to_numpy(dtype=float),
-                pair.iloc[:, 1].to_numpy(dtype=float),
-            )
-    return pairs
+    return data
 
 
-def common_limits(pairs):
-    """Return common, rounded limits so every panel is directly comparable."""
-    values = np.concatenate([array for pair in pairs.values() for array in pair])
-    lower = 10.0 * np.floor(values.min() / 10.0)
-    upper = 10.0 * np.ceil(values.max() / 10.0)
+def finite_pair(data: pd.DataFrame, land: str, model: str) -> tuple[np.ndarray, np.ndarray]:
+    columns = [f"{land}{model}_0", f"{land}{model}_1"]
+    pair = data[columns].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    pair = pair[np.isfinite(pair).all(axis=1)]
+    if len(pair) < 2:
+        raise ValueError(f"Fewer than two finite pairs for {land} / {model}.")
+    return pair[:, 0], pair[:, 1]
+
+
+def common_limits(data: pd.DataFrame) -> tuple[float, float]:
+    values = (
+        data[required_columns()]
+        .apply(pd.to_numeric, errors="coerce")
+        .to_numpy(dtype=float)
+    )
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        raise ValueError("The required columns contain no finite numeric values.")
+
+    lower = float(np.floor(finite.min() / 5.0) * 5.0)
+    upper = float(np.ceil(finite.max() / 5.0) * 5.0)
     if lower == upper:
-        lower -= 10.0
-        upper += 10.0
-    return float(lower), float(upper)
+        lower -= 1.0
+        upper += 1.0
+    return lower, upper
 
 
-def configure_style():
-    """Set reproducible export and typography defaults."""
-    matplotlib.rcParams.update(
-        {
-            "font.family": "DejaVu Sans",
-            "font.size": 8.0,
-            "axes.linewidth": 0.65,
-            "axes.unicode_minus": True,
-            "pdf.fonttype": 42,
-            "ps.fonttype": 42,
-            "savefig.facecolor": "white",
-            "savefig.edgecolor": "white",
-        }
-    )
+def draw_figure(data: pd.DataFrame) -> mpl.figure.Figure:
+    limits = common_limits(data)
+    tick_start = np.ceil(limits[0] / 20.0) * 20.0
+    ticks = np.arange(tick_start, limits[1] + 0.01, 20.0)
 
+    style = {
+        "font.family": "DejaVu Sans",
+        "font.size": 7.5,
+        "axes.linewidth": 0.65,
+        "axes.edgecolor": "#6A6A6A",
+        "axes.labelcolor": "#202020",
+        "xtick.color": "#303030",
+        "ytick.color": "#303030",
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "xtick.major.size": 2.8,
+        "ytick.major.size": 2.8,
+        "xtick.major.width": 0.6,
+        "ytick.major.width": 0.6,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
 
-def make_figure(pairs):
-    """Build the multi-panel figure and return it with panel statistics."""
-    configure_style()
-    lower, upper = common_limits(pairs)
-    major_ticks = np.arange(
-        20.0 * np.ceil(lower / 20.0), upper + 0.1, 20.0
-    )
-    major_ticks = major_ticks[(major_ticks > lower) & (major_ticks < upper)]
-    minor_ticks = np.arange(lower, upper + 0.1, 10.0)
+    with mpl.rc_context(style):
+        fig, axes = uplt.subplots(
+            nrows=4,
+            ncols=4,
+            figsize=(7.35, 7.55),
+            share=True,
+            span=False,
+            left="0.66in",
+            right="0.55in",
+            bottom="0.82in",
+            top="0.62in",
+            wspace="0.07in",
+            hspace="0.07in",
+        )
 
-    fig, axes = uplt.subplots(
-        nrows=len(LAND_COVERS),
-        ncols=len(MODELS),
-        refwidth=1.42,
-        refheight=1.42,
-        share=False,
-        hspace=0.12,
-        wspace=0.12,
-    )
-    fig.patch.set_facecolor("white")
-    statistics = []
+        panel_labels = iter(string.ascii_lowercase)
+        for row, (land_key, land_label) in enumerate(LAND_COVERS):
+            for col, model in enumerate(MODELS):
+                ax = axes[row, col]
+                color = MODEL_COLORS[model]
+                x, y = finite_pair(data, land_key, model)
 
-    for row, land in enumerate(LAND_COVERS):
-        for col, model in enumerate(MODELS):
-            ax = axes[row, col]
-            x, y = pairs[(land, model)]
-            fit = linregress(x, y)
-            rmse = float(np.sqrt(np.mean(np.square(y - x))))
-            statistics.append((land, model, len(x), fit.rvalue, rmse))
+                correlation = float(np.corrcoef(x, y)[0, 1])
+                rmse = float(np.sqrt(np.mean(np.square(y - x))))
+                slope, intercept = np.polyfit(x, y, 1)
+                fit_x = np.array([x.min(), x.max()])
 
-            ax.plot(
-                [lower, upper],
-                [lower, upper],
-                color="#6F6F6F",
-                linewidth=0.8,
-                linestyle=(0, (4, 2.5)),
-                zorder=1,
-            )
-            ax.scatter(
-                x,
-                y,
-                s=5.0,
-                color=MODEL_COLORS[model],
-                alpha=0.23,
-                edgecolors="none",
-                rasterized=True,
-                zorder=2,
-            )
-            fit_x = np.linspace(x.min(), x.max(), 200)
-            ax.plot(
-                fit_x,
-                fit.intercept + fit.slope * fit_x,
-                color=MODEL_COLORS[model],
-                linewidth=1.35,
-                zorder=3,
-            )
-
-            ax.set_xlim(lower, upper)
-            ax.set_ylim(lower, upper)
-            ax.set_aspect("equal", adjustable="box")
-            ax.set_xticks(major_ticks)
-            ax.set_yticks(major_ticks)
-            ax.set_xticks(minor_ticks, minor=True)
-            ax.set_yticks(minor_ticks, minor=True)
-            ax.set_axisbelow(True)
-            ax.grid(which="major", color="#D9D9D9", linewidth=0.48, alpha=0.72)
-            ax.grid(which="minor", visible=False)
-            ax.tick_params(
-                which="major",
-                direction="out",
-                length=2.8,
-                width=0.6,
-                pad=1.6,
-                labelsize=6.8,
-                labelbottom=(row == len(LAND_COVERS) - 1),
-                labelleft=(col == 0),
-                top=False,
-                right=False,
-            )
-            ax.tick_params(which="minor", direction="out", length=1.5, width=0.45)
-            for spine in ax.spines.values():
-                spine.set_color("#4D4D4D")
-                spine.set_linewidth(0.65)
-
-            ax.text(
-                0.045,
-                0.955,
-                f"$r$ = {fit.rvalue:.2f}\nRMSE = {rmse:.2f}\n$n$ = {len(x):,}",
-                transform=ax.transAxes,
-                ha="left",
-                va="top",
-                fontsize=6.8,
-                linespacing=1.18,
-                color="#222222",
-                bbox={
-                    "boxstyle": "square,pad=0.18",
-                    "facecolor": "white",
-                    "edgecolor": "none",
-                    "alpha": 0.80,
-                },
-                zorder=5,
-            )
-            panel_letter = chr(ord("a") + row * len(MODELS) + col)
-            ax.text(
-                0.955,
-                0.045,
-                f"({panel_letter})",
-                transform=ax.transAxes,
-                ha="right",
-                va="bottom",
-                fontsize=7.2,
-                fontweight="bold",
-                color="#222222",
-                zorder=5,
-            )
-
-            if row == 0:
-                ax.set_title(model, fontsize=9.2, fontweight="bold", pad=4.0)
-            if col == 0:
-                ax.text(
-                    -0.22,
-                    0.5,
-                    land.capitalize(),
-                    transform=ax.transAxes,
-                    ha="center",
-                    va="center",
-                    rotation=90,
-                    fontsize=8.2,
-                    fontweight="bold",
-                    color="#222222",
-                    clip_on=False,
+                ax.scatter(
+                    x,
+                    y,
+                    s=5.2,
+                    color=color,
+                    alpha=0.22,
+                    edgecolors="none",
+                    rasterized=True,
+                    zorder=2,
+                )
+                ax.plot(
+                    limits,
+                    limits,
+                    color="#5D6368",
+                    linewidth=0.85,
+                    linestyle=(0, (3.0, 2.2)),
+                    zorder=1,
+                )
+                ax.plot(
+                    fit_x,
+                    slope * fit_x + intercept,
+                    color=color,
+                    linewidth=1.35,
+                    solid_capstyle="round",
+                    zorder=3,
                 )
 
-    fig.suptitle(
-        "Relationships between _0 and _1 across land-cover classes",
-        fontsize=10.5,
-        fontweight="bold",
-        y=0.995,
-    )
-    fig.supxlabel("Value (_0)", fontsize=9.0, y=0.049)
-    fig.supylabel("Value (_1)", fontsize=9.0, x=0.006)
+                ax.set_xlim(limits)
+                ax.set_ylim(limits)
+                ax.set_xticks(ticks)
+                ax.set_yticks(ticks)
+                ax.set_aspect("equal", adjustable="box")
+                ax.set_axisbelow(True)
+                ax.grid(
+                    True,
+                    color="#D8DADD",
+                    linewidth=0.45,
+                    linestyle=(0, (1.2, 2.4)),
+                    alpha=0.9,
+                )
+                ax.tick_params(
+                    labelsize=6.8,
+                    labelbottom=row == len(LAND_COVERS) - 1,
+                    labelleft=col == 0,
+                    pad=2.0,
+                )
 
-    legend_handles = [
-        Line2D(
-            [0],
-            [0],
-            marker="o",
-            linestyle="none",
-            markersize=4.0,
-            markerfacecolor="#707070",
-            markeredgecolor="none",
-            alpha=0.65,
-            label="Paired observations",
-        ),
-        Line2D([0], [0], color="#303030", linewidth=1.35, label="OLS fit"),
-        Line2D(
-            [0],
-            [0],
-            color="#6F6F6F",
-            linewidth=0.8,
-            linestyle=(0, (4, 2.5)),
-            label="1:1 reference",
-        ),
-    ]
-    fig.legend(
-        handles=legend_handles,
-        loc="bottom",
-        ncols=3,
-        frameon=False,
-        fontsize=7.4,
-        handlelength=2.2,
-        columnspacing=1.8,
-    )
-    return fig, statistics
+                panel = next(panel_labels)
+                ax.text(
+                    0.045,
+                    0.955,
+                    f"({panel})",
+                    transform=ax.transAxes,
+                    ha="left",
+                    va="top",
+                    fontsize=7.5,
+                    fontweight="bold",
+                    color="#202020",
+                    zorder=5,
+                )
+                ax.text(
+                    0.955,
+                    0.055,
+                    f"$r$ = {correlation:.3f}\nRMSE = {rmse:.2f}\n$n$ = {len(x):,}",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize=6.3,
+                    linespacing=1.18,
+                    color="#202020",
+                    bbox={
+                        "facecolor": "white",
+                        "edgecolor": "none",
+                        "alpha": 0.84,
+                        "pad": 1.25,
+                    },
+                    zorder=5,
+                )
 
+                if row == 0:
+                    ax.set_title(
+                        model,
+                        fontsize=9.2,
+                        fontweight="bold",
+                        color=color,
+                        pad=5.5,
+                    )
+                if col == len(MODELS) - 1:
+                    ax.text(
+                        1.065,
+                        0.5,
+                        land_label,
+                        transform=ax.transAxes,
+                        rotation=270,
+                        ha="left",
+                        va="center",
+                        fontsize=8.3,
+                        fontweight="semibold",
+                        color="#303030",
+                        clip_on=False,
+                    )
 
-def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    pairs = load_pairs()
-    fig, statistics = make_figure(pairs)
-    fig.savefig(PDF_FILE, dpi=600, bbox_inches="tight", pad_inches=0.04)
-    fig.savefig(PNG_FILE, dpi=600, bbox_inches="tight", pad_inches=0.04)
-    plt.close(fig)
-
-    for land, model, count, correlation, rmse in statistics:
-        print(
-            f"{land:10s} {model:4s}  n={count:4d}  "
-            f"r={correlation:.3f}  RMSE={rmse:.3f}"
+        fig.suptitle(
+            "Paired-variable relationships by land cover and model",
+            x=0.505,
+            y=0.975,
+            fontsize=11.2,
+            fontweight="semibold",
+            color="#202020",
         )
-    print(f"Saved: {PDF_FILE}")
-    print(f"Saved: {PNG_FILE}")
+        fig.text(
+            0.505,
+            0.066,
+            "Value (_0)",
+            ha="center",
+            va="center",
+            fontsize=9.2,
+            fontweight="medium",
+            color="#202020",
+        )
+        fig.text(
+            0.028,
+            0.512,
+            "Value (_1)",
+            ha="center",
+            va="center",
+            rotation=90,
+            fontsize=9.2,
+            fontweight="medium",
+            color="#202020",
+        )
+
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                color="#5D6368",
+                linewidth=0.9,
+                linestyle=(0, (3.0, 2.2)),
+            ),
+            Line2D([0], [0], color="#303030", linewidth=1.35),
+        ]
+        MatplotlibFigure.legend(
+            fig,
+            legend_handles,
+            ["1:1 reference", "OLS fit (model color)"],
+            loc="lower center",
+            bbox_to_anchor=(0.505, 0.010),
+            ncol=2,
+            frameon=False,
+            fontsize=7.2,
+            handlelength=2.8,
+            columnspacing=2.0,
+        )
+
+    return fig
+
+
+def main() -> None:
+    args = parse_args()
+    if args.dpi <= 0:
+        raise ValueError("--dpi must be a positive integer.")
+
+    input_path = args.input.expanduser().resolve()
+    output_dir = args.output_dir.expanduser().resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    data = load_data(input_path)
+    figure = draw_figure(data)
+    pdf_path = output_dir / "correlation_scatter_ultraplot.pdf"
+    png_path = output_dir / "correlation_scatter_ultraplot.png"
+
+    figure.savefig(
+        pdf_path,
+        dpi=args.dpi,
+        facecolor="white",
+        metadata={
+            "Title": "Correlation scatter plots by land cover and model",
+            "Creator": "UltraPlot",
+        },
+    )
+    figure.savefig(
+        png_path,
+        dpi=args.dpi,
+        facecolor="white",
+        metadata={"Software": "UltraPlot"},
+    )
+    plt.close(figure)
+
+    print(f"Read {len(data):,} rows from {input_path}")
+    print(f"Wrote {pdf_path}")
+    print(f"Wrote {png_path} at {args.dpi} dpi")
 
 
 if __name__ == "__main__":

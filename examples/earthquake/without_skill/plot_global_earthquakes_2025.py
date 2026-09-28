@@ -1,388 +1,476 @@
-"""Plot the spatial, magnitude, and depth patterns of 2025 M5+ earthquakes."""
+"""Map 2025 global M5+ earthquakes with magnitude and depth encodings.
+
+The default paths reproduce the deliverables for this task. A different
+USGS-style GeoJSON file or output directory can be supplied on the command
+line without editing the script.
+"""
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")
+os.environ.setdefault("GDAL_DATA", str(Path(sys.prefix) / "Library" / "share" / "gdal"))
 
 import cartopy.crs as ccrs
-import cartopy.feature as cfeature
-import matplotlib.colors as mcolors
-import matplotlib.ticker as mticker
-from matplotlib.colorbar import Colorbar
+import matplotlib as mpl
 import numpy as np
 import ultraplot as uplt
+from matplotlib.colors import BoundaryNorm, ListedColormap
+from matplotlib.lines import Line2D
 
 
-DATA_PATH = (
+DEFAULT_INPUT = (
     Path(__file__).resolve().parents[1]
     / "data"
     / "usgs_earthquakes_2025_m5plus.geojson"
 )
-OUTPUT_DIR = Path(__file__).resolve().parent
-PNG_PATH = OUTPUT_DIR / "global_earthquakes_2025_m5plus.png"
-PDF_PATH = OUTPUT_DIR / "global_earthquakes_2025_m5plus.pdf"
+DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parent
+DEFAULT_BASENAME = "global_earthquakes_2025_m5plus"
+
+DEPTH_EDGES = np.array([0.0, 35.0, 70.0, 150.0, 300.0, 700.0])
+DEPTH_LABELS = ["0-34", "35-69", "70-149", "150-299", "300+"]
+DEPTH_COLORS = ["#f4c95d", "#e99549", "#ce5d58", "#8d4d78", "#3f416f"]
 
 
-def load_earthquakes(path: Path) -> tuple[np.ndarray, ...]:
-    """Return longitude, latitude, depth, magnitude, and time arrays."""
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Create a global UltraPlot map of USGS earthquakes."
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DEFAULT_INPUT,
+        help="USGS-style earthquake GeoJSON file.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="Directory for the PDF and PNG outputs.",
+    )
+    parser.add_argument(
+        "--basename",
+        default=DEFAULT_BASENAME,
+        help="Output filename stem.",
+    )
+    return parser.parse_args()
+
+
+def load_earthquakes(path: Path) -> dict[str, Any]:
+    """Load and validate the fields needed from a USGS GeoJSON catalog."""
     with path.open("r", encoding="utf-8") as stream:
-        collection = json.load(stream)
+        catalog = json.load(stream)
 
-    features = collection.get("features", [])
-    if not features:
-        raise ValueError(f"No earthquake features found in {path}")
+    if catalog.get("type") != "FeatureCollection":
+        raise ValueError(f"Expected a GeoJSON FeatureCollection: {path}")
 
-    records: list[tuple[float, float, float, float, int]] = []
-    for feature in features:
+    records: list[tuple[float, float, float, float, int, str]] = []
+    for feature in catalog.get("features", []):
         geometry = feature.get("geometry") or {}
         properties = feature.get("properties") or {}
         coordinates = geometry.get("coordinates") or []
         if geometry.get("type") != "Point" or len(coordinates) < 3:
             continue
-        values = (coordinates[0], coordinates[1], coordinates[2], properties.get("mag"))
-        if any(value is None for value in values):
+        try:
+            lon, lat, depth = map(float, coordinates[:3])
+            magnitude = float(properties["mag"])
+            epoch_ms = int(properties["time"])
+        except (KeyError, TypeError, ValueError):
             continue
-        records.append((*map(float, values), int(properties.get("time", 0))))
-
-    data = np.asarray(records, dtype=float)
-    if data.size == 0:
-        raise ValueError("No valid point records with magnitude and depth were found")
-
-    longitude, latitude, depth, magnitude, time_ms = data.T
-    valid = (
-        np.isfinite(data).all(axis=1)
-        & (longitude >= -180)
-        & (longitude <= 180)
-        & (latitude >= -90)
-        & (latitude <= 90)
-        & (depth >= 0)
-        & (magnitude >= 5)
-    )
-    if not valid.all():
-        longitude, latitude, depth, magnitude, time_ms = (
-            array[valid] for array in (longitude, latitude, depth, magnitude, time_ms)
+        if not np.all(np.isfinite([lon, lat, depth, magnitude])):
+            continue
+        records.append(
+            (lon, lat, max(depth, 0.0), magnitude, epoch_ms, str(properties.get("place", "")))
         )
-    return longitude, latitude, depth, magnitude, time_ms
+
+    if not records:
+        raise ValueError(f"No valid point earthquakes found in {path}")
+
+    return {
+        "longitude": np.array([row[0] for row in records]),
+        "latitude": np.array([row[1] for row in records]),
+        "depth": np.array([row[2] for row in records]),
+        "magnitude": np.array([row[3] for row in records]),
+        "time": np.array([row[4] for row in records], dtype=np.int64),
+        "place": np.array([row[5] for row in records], dtype=object),
+        "metadata": catalog.get("metadata") or {},
+    }
 
 
-def marker_area(magnitude: np.ndarray | float) -> np.ndarray | float:
-    """Map magnitude to marker area while keeping rare large events legible."""
-    return 7.0 + 13.0 * (np.asarray(magnitude) - 5.0) ** 2
+def marker_area(magnitude: np.ndarray | float) -> np.ndarray:
+    """Convert magnitude to marker area in points squared."""
+    values = np.asarray(magnitude, dtype=float)
+    return 9.0 * np.power(2.25, values - 5.0)
 
 
-def style_cartesian_axis(axis) -> None:
-    axis.set_facecolor("#fbfcfc")
-    axis.grid(axis="y", color="#d8dee1", linewidth=0.55, alpha=0.8, zorder=0)
-    axis.tick_params(axis="both", which="major", labelsize=8, length=3, width=0.7)
-    axis.tick_params(axis="both", which="minor", length=2, width=0.5)
-    axis.spines["top"].set_visible(False)
-    axis.spines["right"].set_visible(False)
-    axis.spines["left"].set_color("#68747a")
-    axis.spines["bottom"].set_color("#68747a")
+def angular_distance_deg(
+    lon1: float, lat1: float, lon2: float, lat2: float
+) -> float:
+    """Great-circle angular distance used to separate map annotations."""
+    lon1r, lat1r, lon2r, lat2r = np.deg2rad([lon1, lat1, lon2, lat2])
+    cosine = (
+        np.sin(lat1r) * np.sin(lat2r)
+        + np.cos(lat1r) * np.cos(lat2r) * np.cos(lon1r - lon2r)
+    )
+    return float(np.rad2deg(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
 
-def main() -> None:
-    longitude, latitude, depth, magnitude, _ = load_earthquakes(DATA_PATH)
-    event_count = magnitude.size
+def select_major_events(data: dict[str, Any], number: int = 3) -> list[int]:
+    """Select large events while avoiding labels in the same cluster."""
+    order = np.argsort(-data["magnitude"], kind="stable")
+    selected: list[int] = []
+    for index in order:
+        if all(
+            angular_distance_deg(
+                data["longitude"][index],
+                data["latitude"][index],
+                data["longitude"][other],
+                data["latitude"][other],
+            )
+            >= 25.0
+            for other in selected
+        ):
+            selected.append(int(index))
+        if len(selected) == number:
+            break
+    return selected
 
-    uplt.rc.update(
+
+def shorten_place(place: str, limit: int = 34) -> str:
+    text = place.removeprefix("2025 ").removesuffix(" Earthquake").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def event_year_and_range(epoch_ms: np.ndarray) -> tuple[str, str]:
+    dates = [datetime.fromtimestamp(value / 1000, timezone.utc) for value in epoch_ms]
+    years = sorted({date.year for date in dates})
+    year_text = str(years[0]) if len(years) == 1 else f"{years[0]}-{years[-1]}"
+    date_range = f"{min(dates):%b %d}-{max(dates):%b %d, %Y} UTC"
+    return year_text, date_range
+
+
+def draw_figure(data: dict[str, Any]) -> mpl.figure.Figure:
+    mpl.rcParams.update(
         {
             "font.family": "DejaVu Sans",
-            "axes.labelcolor": "#26343a",
-            "axes.titlecolor": "#17262c",
-            "text.color": "#26343a",
-            "xtick.color": "#536269",
-            "ytick.color": "#536269",
-            "figure.facecolor": "#f7f9f9",
-            "savefig.facecolor": "#f7f9f9",
+            "font.size": 9.0,
+            "axes.titleweight": "bold",
+            "axes.titlesize": 11.0,
+            "axes.labelsize": 9.0,
+            "xtick.labelsize": 8.0,
+            "ytick.labelsize": 8.0,
+            "savefig.facecolor": "#fbfcfc",
         }
     )
 
-    figure, axes = uplt.subplots(
-        [[1, 1], [2, 3]],
-        proj={1: ccrs.Robinson(central_longitude=180)},
-        figsize=(12.0, 8.7),
-        hratios=(1.92, 1.0),
-        wspace=0.34,
-        hspace=0.78,
+    longitude = data["longitude"]
+    latitude = data["latitude"]
+    depth = data["depth"]
+    magnitude = data["magnitude"]
+    count = len(magnitude)
+    year_text, date_range = event_year_and_range(data["time"])
+
+    projection = uplt.Proj("robin", lon0=150)
+    layout = [[1, 1], [1, 1], [1, 1], [2, 3]]
+    fig, axes = uplt.subplots(
+        layout,
+        proj={1: projection},
+        figwidth=13.0,
+        figheight=8.4,
+        hratios=(1.0, 1.0, 1.0, 0.88),
+        wratios=(1.05, 1.0),
+        hspace="0.30in",
+        wspace="0.28in",
+        bottom="0.80in",
         share=False,
     )
-    map_axis, magnitude_axis, depth_axis = axes
+    ax_map, ax_magnitude, ax_depth = axes
+    fig.patch.set_facecolor("#fbfcfc")
 
-    # Geographic context uses a Pacific-centered view so the Ring of Fire is continuous.
-    map_axis.set_global()
-    map_axis.add_feature(
-        cfeature.OCEAN.with_scale("110m"), facecolor="#dce9ed", edgecolor="none", zorder=0
+    ax_map.format(
+        coast=True,
+        land=True,
+        ocean=True,
+        landcolor="#f3f1eb",
+        oceancolor="#dcecf2",
+        coastcolor="#707d82",
+        coastlinewidth=0.55,
+        longrid=True,
+        latgrid=True,
+        gridcolor="#91a3a9",
+        gridalpha=0.42,
+        gridlinewidth=0.38,
+        lonlocator=60,
+        latlocator=30,
+        labels=False,
+        lefttitle=f"{count:,} events | {date_range}",
+        righttitle="Circle area: magnitude | color: focal depth",
+        title_kw={"fontsize": 9.2, "fontweight": "normal", "color": "#3b474b"},
     )
-    map_axis.add_feature(
-        cfeature.LAND.with_scale("110m"), facecolor="#edf0eb", edgecolor="none", zorder=1
-    )
-    map_axis.coastlines(resolution="110m", color="#718087", linewidth=0.45, zorder=2)
-    map_axis.spines["geo"].set_color("#4e5f66")
-    map_axis.spines["geo"].set_linewidth(0.7)
-    gridlines = map_axis.gridlines(
-        crs=ccrs.PlateCarree(),
-        draw_labels=False,
-        linewidth=0.38,
-        color="#78909a",
-        alpha=0.48,
-        linestyle=(0, (2, 3)),
-        zorder=2,
-    )
-    gridlines.xlocator = mticker.FixedLocator(np.arange(-180, 181, 60))
-    gridlines.ylocator = mticker.FixedLocator(np.arange(-60, 61, 30))
 
-    color_limit = max(650.0, float(np.ceil(depth.max() / 50.0) * 50.0))
-    depth_norm = mcolors.PowerNorm(gamma=0.5, vmin=0, vmax=color_limit)
-    depth_cmap = uplt.Colormap("cividis")
-    draw_order = np.lexsort((depth, magnitude))
-    points = map_axis.scatter(
-        longitude[draw_order],
-        latitude[draw_order],
-        c=depth[draw_order],
-        s=marker_area(magnitude[draw_order]),
-        cmap=depth_cmap,
-        norm=depth_norm,
-        alpha=0.78,
-        edgecolors="#ffffff",
-        linewidths=0.25,
-        transform=ccrs.PlateCarree(),
+    cmap = ListedColormap(DEPTH_COLORS, name="earthquake_depth")
+    norm = BoundaryNorm(DEPTH_EDGES, cmap.N, clip=True)
+    plate_carree = ccrs.PlateCarree()
+    plot_order = np.argsort(magnitude, kind="stable")
+
+    points = ax_map.scatter(
+        longitude[plot_order],
+        latitude[plot_order],
+        c=depth[plot_order],
+        s=marker_area(magnitude[plot_order]),
+        cmap=cmap,
+        norm=norm,
+        transform=plate_carree,
+        alpha=0.82,
+        edgecolors="#fbfcfc",
+        linewidths=0.28,
         rasterized=True,
         zorder=3,
     )
 
     major = magnitude >= 7.0
-    map_axis.scatter(
+    ax_map.scatter(
         longitude[major],
         latitude[major],
-        s=marker_area(magnitude[major]) + 12,
+        s=marker_area(magnitude[major]) * 1.16,
         facecolors="none",
-        edgecolors="#a82127",
+        edgecolors="#24272b",
         linewidths=0.9,
-        transform=ccrs.PlateCarree(),
+        transform=plate_carree,
         zorder=4,
     )
 
-    largest = int(np.argmax(magnitude))
-    map_axis.annotate(
-        f"Largest: M {magnitude[largest]:.1f}\n29 Jul, Kamchatka",
-        xy=(longitude[largest], latitude[largest]),
-        xycoords=ccrs.PlateCarree()._as_mpl_transform(map_axis),
-        xytext=(18, -36),
-        textcoords="offset points",
-        fontsize=7.5,
-        fontweight="bold",
-        ha="left",
-        va="top",
-        color="#7f161c",
-        bbox={
-            "boxstyle": "round,pad=0.28",
-            "facecolor": "#fffdf9",
-            "edgecolor": "#c79591",
-            "linewidth": 0.6,
-            "alpha": 0.96,
-        },
-        arrowprops={"arrowstyle": "-", "color": "#8b2a2e", "linewidth": 0.75},
-        zorder=6,
-    )
-
-    size_values = (5.0, 6.0, 7.0, 8.0)
-    size_handles = [
-        map_axis.scatter(
-            [],
-            [],
-            s=marker_area(value),
-            facecolor="#66777e",
-            edgecolor="#ffffff",
-            linewidth=0.4,
-        )
-        for value in size_values
-    ]
-    size_legend = map_axis.legend(
-        size_handles,
-        [f"M {value:.0f}" for value in size_values],
-        title="Magnitude (marker area)",
-        loc="lower left",
-        bbox_to_anchor=(0.018, 0.018),
-        ncol=4,
-        frameon=True,
-        fancybox=False,
-        facecolor="#fffdf9",
-        edgecolor="#a9b3b7",
-        framealpha=0.96,
-        fontsize=7.2,
-        title_fontsize=7.5,
-        handletextpad=0.35,
-        columnspacing=0.9,
-        borderpad=0.55,
-    )
-    size_legend.set_zorder(7)
-
-    colorbar_axis = figure.add_axes([0.690, 0.389, 0.200, 0.013], label="depth_colorbar")
-    colorbar = Colorbar(
-        colorbar_axis,
+    depth_midpoints = (DEPTH_EDGES[:-1] + DEPTH_EDGES[1:]) / 2
+    colorbar = ax_map.colorbar(
         points,
-        orientation="horizontal",
-        ticks=[0, 70, 300, 600],
+        loc="r",
+        ticks=depth_midpoints,
+        label="Focal depth (km)",
+        length=0.68,
+        width=0.15,
+        ticklabelsize=7.8,
+        labelsize=8.7,
     )
-    colorbar.ax.tick_params(labelsize=6.8, length=2, pad=1)
-    colorbar.ax.minorticks_off()
-    colorbar.ax.tick_params(which="minor", bottom=False, top=False)
-    colorbar.ax.set_title("Depth (km; square-root color scale)", fontsize=7.2, pad=4)
-    colorbar.outline.set_linewidth(0.5)
-    colorbar.outline.set_edgecolor("#65737a")
+    colorbar.ax.set_yticklabels(DEPTH_LABELS)
+    colorbar.outline.set_linewidth(0.6)
 
-    map_axis.text(
-        0.015,
-        0.92,
-        "A",
-        transform=map_axis.transAxes,
-        ha="left",
-        va="top",
-        fontsize=10,
-        fontweight="bold",
-        bbox={"facecolor": "#f7f9f9", "edgecolor": "none", "pad": 2.2, "alpha": 0.9},
-        zorder=8,
-    )
-    map_axis.set_title(
-        f"{event_count:,} USGS events | Pacific-centered Robinson projection | "
-        "marker area encodes magnitude; color encodes depth",
-        loc="left",
-        fontsize=9.5,
-        color="#53656c",
-        pad=7,
-    )
-
-    # Magnitude distribution. A log count axis keeps the rare M7+ tail visible.
-    magnitude_bins = np.arange(4.95, 9.16, 0.2)
-    magnitude_axis.hist(
-        magnitude,
-        bins=magnitude_bins,
-        color="#c64f42",
-        edgecolor="#fffdf9",
-        linewidth=0.45,
-        zorder=2,
-    )
-    magnitude_axis.axvline(6.0, color="#8a2d29", linewidth=0.8, linestyle="--", zorder=3)
-    magnitude_axis.axvline(7.0, color="#8a2d29", linewidth=0.8, linestyle="--", zorder=3)
-    magnitude_axis.set_yscale("log")
-    magnitude_axis.set_xlim(4.9, 9.05)
-    magnitude_axis.set_ylim(0.8, 800)
-    magnitude_axis.set_xticks([5, 6, 7, 8, 9])
-    magnitude_axis.set_xlabel("Reported magnitude", fontsize=9)
-    magnitude_axis.set_ylabel("Number of events (log scale)", fontsize=9)
-    magnitude_axis.text(
-        0.0,
-        0.985,
-        "B  Magnitude distribution",
-        transform=magnitude_axis.transAxes,
-        ha="left",
-        va="top",
-        fontsize=10.5,
-        fontweight="bold",
-        bbox={"facecolor": "#fbfcfc", "edgecolor": "none", "pad": 1.8, "alpha": 0.94},
-        zorder=6,
-    )
-    magnitude_axis.text(
-        0.97,
-        0.95,
-        f"M >= 6: {(magnitude >= 6).sum():,} ({(magnitude >= 6).mean():.1%})\n"
-        f"M >= 7: {(magnitude >= 7).sum():,} ({(magnitude >= 7).mean():.1%})",
-        transform=magnitude_axis.transAxes,
-        ha="right",
-        va="top",
-        fontsize=8,
-        linespacing=1.35,
-        bbox={"facecolor": "#fffdf9", "edgecolor": "#d8c1bd", "pad": 3, "alpha": 0.95},
-        zorder=5,
-    )
-    style_cartesian_axis(magnitude_axis)
-
-    # Depth distribution with conventional shallow/intermediate/deep boundaries.
-    depth_bins = np.arange(0, 676, 25)
-    depth_counts, depth_edges = np.histogram(depth, bins=depth_bins)
-    depth_centers = (depth_edges[:-1] + depth_edges[1:]) / 2
-    depth_axis.bar(
-        depth_centers,
-        depth_counts,
-        width=np.diff(depth_edges) * 0.92,
-        color=depth_cmap(depth_norm(depth_centers)),
-        edgecolor="#f7f9f9",
-        linewidth=0.35,
-        zorder=2,
-    )
-    for boundary in (70, 300):
-        depth_axis.axvline(boundary, color="#48565c", linewidth=0.75, linestyle="--", zorder=3)
-    depth_axis.set_yscale("log")
-    depth_axis.set_xlim(0, 675)
-    depth_axis.set_ylim(0.8, 1500)
-    depth_axis.set_xticks([0, 70, 150, 300, 450, 600])
-    depth_axis.set_xlabel("Hypocentral depth (km)", fontsize=9)
-    depth_axis.set_ylabel("Number of events (log scale)", fontsize=9)
-    depth_axis.text(
-        0.0,
-        0.985,
-        "C  Depth distribution",
-        transform=depth_axis.transAxes,
-        ha="left",
-        va="top",
-        fontsize=10.5,
-        fontweight="bold",
-        bbox={"facecolor": "#fbfcfc", "edgecolor": "none", "pad": 1.8, "alpha": 0.94},
-        zorder=6,
-    )
-
-    zones = (
-        (35, depth < 70, "<70 km"),
-        (185, (depth >= 70) & (depth < 300), "70-300 km"),
-        (480, depth >= 300, ">=300 km"),
-    )
-    for x_position, mask, label in zones:
-        depth_axis.text(
-            x_position,
-            0.82,
-            f"{label}\n{mask.sum():,} ({mask.mean():.1%})",
-            transform=depth_axis.get_xaxis_transform(),
-            ha="center",
-            va="top",
-            fontsize=7.6,
-            fontweight="bold",
-            linespacing=1.25,
-            bbox={"facecolor": "#fffdf9", "edgecolor": "#ccd4d6", "pad": 2.2, "alpha": 0.93},
-            zorder=5,
+    magnitude_examples = [5.0, 6.0, 7.0, 8.0]
+    magnitude_handles = [
+        Line2D(
+            [],
+            [],
+            linestyle="",
+            marker="o",
+            markersize=float(np.sqrt(marker_area(value))),
+            markerfacecolor="#7c667e",
+            markeredgecolor="#ffffff",
+            markeredgewidth=0.6,
         )
-    style_cartesian_axis(depth_axis)
-
-    figure.suptitle(
-        "2025 Global Earthquakes of Magnitude 5.0+",
-        x=0.075,
-        y=0.985,
-        ha="left",
-        va="top",
-        fontsize=18,
-        fontweight="bold",
-        color="#14272e",
+        for value in magnitude_examples
+    ]
+    legend = ax_map.legend(
+        magnitude_handles,
+        [f"M{value:.0f}" for value in magnitude_examples],
+        title="Magnitude",
+        loc="lower left",
+        bbox_to_anchor=(0.018, 0.025),
+        ncols=4,
+        frame=True,
+        framealpha=0.94,
+        facecolor="#ffffff",
+        edgecolor="#8d989c",
+        fontsize=7.8,
+        title_fontsize=8.2,
+        borderpad=0.55,
+        handletextpad=0.35,
+        columnspacing=0.75,
     )
-    figure.text(
-        0.075,
-        0.004,
-        "Source: USGS Earthquake Catalog, 1 Jan-31 Dec 2025 UTC. "
-        "Red outlines identify M7.0+ events. Histogram counts use logarithmic y-axes.",
+    legend.get_frame().set_linewidth(0.55)
+
+    for index in select_major_events(data):
+        lon = float(longitude[index])
+        lat = float(latitude[index])
+        mag = float(magnitude[index])
+        dx = -10 if lon > 105 or lon < -30 else 10
+        dy = -16 if lat > 45 else (13 if lat >= 0 else -15)
+        ax_map.annotate(
+            f"M{mag:.1f}  {shorten_place(str(data['place'][index]))}",
+            xy=(lon, lat),
+            xycoords=plate_carree._as_mpl_transform(ax_map),
+            xytext=(dx, dy),
+            textcoords="offset points",
+            ha="right" if dx < 0 else "left",
+            va="center",
+            fontsize=7.2,
+            color="#202326",
+            bbox={
+                "boxstyle": "round,pad=0.28,rounding_size=0.12",
+                "facecolor": "#ffffff",
+                "edgecolor": "#778489",
+                "linewidth": 0.55,
+                "alpha": 0.95,
+            },
+            arrowprops={
+                "arrowstyle": "-",
+                "color": "#59656a",
+                "linewidth": 0.7,
+                "shrinkA": 2,
+                "shrinkB": 4,
+            },
+            annotation_clip=True,
+            zorder=6,
+        )
+
+    magnitude_edges = np.array([5.0, 5.5, 6.0, 6.5, 7.0, np.inf])
+    magnitude_labels = ["5.0-5.4", "5.5-5.9", "6.0-6.4", "6.5-6.9", "7.0+"]
+    magnitude_counts = np.array(
+        [
+            np.count_nonzero((magnitude >= low) & (magnitude < high))
+            for low, high in zip(magnitude_edges[:-1], magnitude_edges[1:])
+        ]
+    )
+    magnitude_bar_colors = ["#a9b9bd", "#88a2a9", "#d7ab58", "#cf704e", "#9e3446"]
+    y_positions = np.arange(len(magnitude_labels))
+    ax_magnitude.barh(
+        y_positions,
+        np.maximum(magnitude_counts - 1, 0),
+        left=1,
+        width=0.62,
+        color=magnitude_bar_colors,
+        edgecolor="none",
+        zorder=3,
+    )
+    ax_magnitude.set_xscale("log")
+    ax_magnitude.set_xlim(1, max(3000, int(magnitude_counts.max() * 1.8)))
+    ax_magnitude.set_yticks(y_positions, labels=magnitude_labels)
+    ax_magnitude.set_ylim(len(magnitude_labels) - 0.35, -0.65)
+    for y_value, value in zip(y_positions, magnitude_counts):
+        is_largest = value > magnitude_counts.max() * 0.5
+        ax_magnitude.text(
+            value / 1.12 if is_largest else max(value * 1.10, 1.5),
+            y_value,
+            f"{value:,}  ({value / count:.1%})",
+            va="center",
+            ha="right" if is_largest else "left",
+            fontsize=7.7,
+            color="#263034" if is_largest else "#31383b",
+        )
+    ax_magnitude.format(
+        title="Magnitude frequency",
+        xlabel="Event count (log scale)",
+        ylabel="Magnitude",
+        xgrid=True,
+        ygrid=False,
+        gridcolor="#d2dadd",
+        gridlinewidth=0.5,
+        facecolor="#fbfcfc",
+    )
+
+    depth_counts, _ = np.histogram(depth, bins=DEPTH_EDGES)
+    ax_depth.barh(
+        y_positions,
+        depth_counts,
+        width=0.62,
+        color=DEPTH_COLORS,
+        edgecolor="none",
+        zorder=3,
+    )
+    ax_depth.set_xlim(0, depth_counts.max() * 1.34)
+    ax_depth.set_yticks(y_positions, labels=DEPTH_LABELS)
+    ax_depth.set_ylim(len(DEPTH_LABELS) - 0.35, -0.65)
+    for y_value, value in zip(y_positions, depth_counts):
+        ax_depth.text(
+            value + depth_counts.max() * 0.025,
+            y_value,
+            f"{value:,}  ({value / count:.1%})",
+            va="center",
+            ha="left",
+            fontsize=7.7,
+            color="#31383b",
+        )
+    ax_depth.format(
+        title="Depth composition",
+        xlabel="Event count",
+        ylabel="Depth (km)",
+        xgrid=True,
+        ygrid=False,
+        gridcolor="#d2dadd",
+        gridlinewidth=0.5,
+        facecolor="#fbfcfc",
+    )
+
+    for axis in (ax_magnitude, ax_depth):
+        axis.set_axisbelow(True)
+        axis.spines["top"].set_visible(False)
+        axis.spines["right"].set_visible(False)
+        axis.spines["left"].set_visible(False)
+        axis.tick_params(axis="y", length=0, pad=5)
+        axis.tick_params(axis="x", colors="#566267")
+
+    fig.format(
+        suptitle=f"Global M5.0+ Earthquakes | {year_text}",
+        suptitle_kw={
+            "fontsize": 18.5,
+            "fontweight": "bold",
+            "color": "#172126",
+        },
+    )
+    fig.text(
+        0.055,
+        0.018,
+        "Source: USGS Earthquake Hazards Program GeoJSON catalog  |  "
+        "Map: Robinson projection centered on 150E  |  "
+        "Symbol area increases exponentially with magnitude; depth colors are classed.",
         ha="left",
         va="bottom",
-        fontsize=7.4,
-        color="#5a696f",
+        fontsize=7.5,
+        color="#5b676c",
     )
+    return fig
 
-    figure.savefig(PNG_PATH, dpi=300, bbox_inches="tight", pad_inches=0.12)
-    figure.savefig(PDF_PATH, dpi=300, bbox_inches="tight", pad_inches=0.12)
-    print(f"Saved {PNG_PATH}")
-    print(f"Saved {PDF_PATH}")
-    print(
-        f"Plotted {event_count} events; magnitude {magnitude.min():.1f}-{magnitude.max():.1f}; "
-        f"depth {depth.min():.1f}-{depth.max():.1f} km"
+
+def main() -> None:
+    args = parse_args()
+    data = load_earthquakes(args.input)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    fig = draw_figure(data)
+
+    pdf_path = args.output_dir / f"{args.basename}.pdf"
+    png_path = args.output_dir / f"{args.basename}.png"
+    fig.savefig(
+        pdf_path,
+        bbox_inches="tight",
+        facecolor=fig.get_facecolor(),
+        metadata={
+            "Title": "Global M5.0+ Earthquakes in 2025",
+            "Author": "UltraPlot",
+            "Subject": "USGS earthquake magnitude, depth, and spatial distribution",
+        },
     )
+    fig.savefig(
+        png_path,
+        dpi=300,
+        bbox_inches="tight",
+        facecolor=fig.get_facecolor(),
+    )
+    print(f"Loaded {len(data['magnitude']):,} earthquakes from {args.input}")
+    print(
+        f"Magnitude range: {data['magnitude'].min():.1f}-{data['magnitude'].max():.1f}; "
+        f"depth range: {data['depth'].min():.1f}-{data['depth'].max():.1f} km"
+    )
+    print(f"Saved {pdf_path}")
+    print(f"Saved {png_path}")
 
 
 if __name__ == "__main__":

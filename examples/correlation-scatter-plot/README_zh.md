@@ -10,8 +10,11 @@
   也没有底层文件访问审计，因此本次测试并非操作系统级密封或完全盲法实验。
 - skill 禁用组没有打开 skill 指令或 skill 支持文件；但系统提供的 skill 目录
   及其简短说明仍然可见，因此不能声称该组不可能知道 skill 的存在。
-- skill 启用组使用 `ultraplot-figures` v1.2.1，且没有读取已有示例结果或此前的
+- skill 启用组使用 `ultraplot-figures` v1.3.0，且没有读取已有示例结果或此前的
   skill 测试结果。
+- skill 启用组使用了正常运行的 UltraPlot MCP。MCP 的 `ultraplot.subplots` 源文件
+  与所选 `spyder_env` 中的 UltraPlot 2.7.0 运行时一致，并通过任务相关查询检查了
+  `PlotAxes.scatter` 和 `Figure.supxlabel`；skill 禁用组没有使用 UltraPlot MCP。
 - 没有证据表明任一条件读取了已有测试结果或其他条件的产物；四个条件的结果
   全部冻结后才开始跨组比较。
 - 集成到仓库时仅调整了输入路径、输出目录和仓库既有输出基名，随后使用同一
@@ -47,10 +50,10 @@
 
 | 条件 | 绘图指令 |
 |---|---|
-| 启用 skill | `请用 [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.2.1/SKILL.md) 制作一张适合论文使用的相关性散点图。` |
+| 启用 skill | `请用 [$ultraplot-figures](https://github.com/lwq-star/ultraplot-figures/blob/v1.3.0/SKILL.md) 制作一张适合论文使用的相关性散点图。` |
 | 禁用 skill | `请用 UltraPlot 制作一张适合论文使用的相关性散点图。` |
 
-图件使用 UltraPlot 2.6.0 和 Matplotlib 3.10.6 重新生成。
+图件使用 UltraPlot 2.7.0 和 Matplotlib 3.10.6 重新生成。
 
 ## 图件对比
 
@@ -75,6 +78,6 @@
 | 项目 | 启用 skill | 禁用 skill |
 |---|---:|---:|
 | PDF 页数 | 1 | 1 |
-| PDF 页面尺寸 | 182.9996 × 178.7169 mm | 161.7767 × 169.0147 mm |
-| PNG 像素尺寸 | 7,204 × 7,036 px | 3,821 × 3,992 px |
+| PDF 页面尺寸 | 182.9996 × 179.8458 mm | 186.6900 × 191.7700 mm |
+| PNG 像素尺寸 | 7,204 × 7,080 px | 4,410 × 4,530 px |
 | PNG 分辨率元数据 | 999.998 dpi | 599.999 dpi |

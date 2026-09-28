@@ -15,16 +15,16 @@ installing the skill does not download example data or rendered outputs.
 Each comparison retains the input data, editable scripts, and final PDF and PNG
 outputs for both the skill-enabled and skill-disabled conditions. The current
 comparisons were retested with
-[`ultraplot-figures` v1.2.1](https://github.com/lwq-star/ultraplot-figures/blob/v1.2.1/SKILL.md).
+[`ultraplot-figures` v1.3.0](https://github.com/lwq-star/ultraplot-figures/blob/v1.3.0/SKILL.md).
 
 ## Reproduction environment
 
-The examples were last verified with Python 3.13.7, UltraPlot 2.6.0,
+The examples were last verified with Python 3.13.7, UltraPlot 2.7.0,
 Matplotlib 3.10.6, and NumPy 2.4.5. The earthquake example also requires
 Cartopy 0.25.0. The correlation example also requires pandas 2.3.3 and
 openpyxl 3.1.5. Each script resolves its input and output paths relative to its
-own example directory. The comparison runs used GPT-5.6 Sol with `ultra`
-reasoning on a Windows computer.
+own example directory. The comparison runs were generated on Windows by
+mutually independent Codex agents, each starting from a blank context.
 
 ## Data and license
 

@@ -14,15 +14,15 @@
 
 每个对照案例均保留输入数据、可编辑脚本，以及启用和禁用 skill 两种条件下的最终
 PDF 和 PNG。当前案例使用
-[`ultraplot-figures` v1.2.1](https://github.com/lwq-star/ultraplot-figures/blob/v1.2.1/SKILL.md)
+[`ultraplot-figures` v1.3.0](https://github.com/lwq-star/ultraplot-figures/blob/v1.3.0/SKILL.md)
 重新测试。
 
 ## 复现环境
 
-这些示例最近使用 Python 3.13.7、UltraPlot 2.6.0、Matplotlib 3.10.6 和
+这些示例最近使用 Python 3.13.7、UltraPlot 2.7.0、Matplotlib 3.10.6 和
 NumPy 2.4.5 核验。地震案例还需要 Cartopy 0.25.0；相关性案例还需要
 pandas 2.3.3 和 openpyxl 3.1.5。各脚本均相对于自身案例目录解析输入和输出路径。
-本次对照测试在 Windows 电脑上使用 GPT-5.6 Sol 模型和 `ultra` 推理强度完成。
+本次对照测试由相互独立、均从空白上下文开始的 Codex agents 在 Windows 上生成。
 
 ## 数据与许可证
 

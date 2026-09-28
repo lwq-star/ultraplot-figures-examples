@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from itertools import product
 from pathlib import Path
 
 import numpy as np
@@ -8,101 +9,98 @@ import pandas as pd
 import ultraplot as uplt
 
 
-LAND_COVERS = ("cropland", "forest", "grassland", "savanna")
-LAND_LABELS = ("Cropland", "Forest", "Grassland", "Savanna")
-MODELS = ("DNN", "GBRT", "LR", "SVR")
 DEFAULT_INPUT = (
     Path(__file__).resolve().parent.parent / "data" / "multiple_data.xlsx"
 )
+LAND_COVERS = ("cropland", "forest", "grassland", "savanna")
+MODELS = ("DNN", "GBRT", "LR", "SVR")
 EXPORT_DPI = 1000
+OUTPUT_STEM = "correlation_scatter"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Plot paired _0 and _1 values by land cover and model."
+        description="Plot _0 versus _1 for four land covers and four models."
     )
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument(
-        "--output-dir", type=Path, default=Path(__file__).resolve().parent
+        "--input",
+        type=Path,
+        default=DEFAULT_INPUT,
+        help="Input Excel workbook (default: %(default)s)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent,
+        help="Directory for PDF and PNG outputs (default: script directory)",
     )
     return parser.parse_args()
 
 
-def load_pairs(path: Path) -> tuple[dict[tuple[str, str], pd.DataFrame], tuple[float, float]]:
-    if not path.is_file():
-        raise FileNotFoundError(f"Input workbook not found: {path}")
-
-    data = pd.read_excel(path)
+def main() -> None:
+    args = parse_args()
     required = [
-        f"{land}{model}_{suffix}"
-        for land in LAND_COVERS
-        for model in MODELS
-        for suffix in (0, 1)
+        f"{land_cover}{model}_{suffix}"
+        for land_cover, model, suffix in product(LAND_COVERS, MODELS, (0, 1))
     ]
-    missing = sorted(set(required) - set(data.columns))
+
+    data = pd.read_excel(args.input, sheet_name=0)
+    missing = [column for column in required if column not in data.columns]
     if missing:
         raise ValueError(f"Missing required columns: {', '.join(missing)}")
 
-    pairs: dict[tuple[str, str], pd.DataFrame] = {}
-    plotted_values: list[np.ndarray] = []
-    for land in LAND_COVERS:
-        for model in MODELS:
-            columns = [f"{land}{model}_0", f"{land}{model}_1"]
-            pair = data.loc[:, columns]
-            if not pair[columns[0]].isna().equals(pair[columns[1]].isna()):
-                raise ValueError(f"Unpaired missing value(s) in {land} / {model}")
-            pair = pair.dropna()
-            if pair.empty:
-                raise ValueError(f"No paired observations for {land} / {model}")
-            values = pair.to_numpy(dtype=float)
-            if not np.isfinite(values).all():
-                raise ValueError(f"Non-finite paired value(s) in {land} / {model}")
-            pairs[(land, model)] = pair
-            plotted_values.append(values.ravel())
+    values = data[required].apply(pd.to_numeric, errors="raise")
+    observed = values.to_numpy(dtype=float)
+    observed = observed[~np.isnan(observed)]
+    if observed.size == 0:
+        raise ValueError("The required columns contain no observed values.")
+    if not np.isfinite(observed).all():
+        raise ValueError("The required columns contain infinite values.")
 
-    all_values = np.concatenate(plotted_values)
-    data_min, data_max = float(all_values.min()), float(all_values.max())
-    pad = 0.03 * (data_max - data_min)
-    return pairs, (data_min - pad, data_max + pad)
-
-
-def main() -> None:
-    args = parse_args()
-    pairs, limits = load_pairs(args.input)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    data_span = float(np.ptp(observed))
+    if data_span == 0:
+        raise ValueError("A scatter plot requires a non-zero data range.")
+    padding = 0.04 * data_span
+    limits = (float(observed.min() - padding), float(observed.max() + padding))
 
     fig, axs = uplt.subplots(
         nrows=len(LAND_COVERS),
         ncols=len(MODELS),
+        order="C",
+        share=3,
+        span=False,
+        refaspect=1,
         journal="nat2",
-        share=True,
         tight=True,
     )
 
-    for ax, land, model in zip(
-        axs,
-        np.repeat(LAND_COVERS, len(MODELS)),
-        np.tile(MODELS, len(LAND_COVERS)),
-    ):
-        pair = pairs[(land, model)]
-        x = pair.iloc[:, 0].to_numpy()
-        y = pair.iloc[:, 1].to_numpy()
-        correlation = np.corrcoef(x, y)[0, 1]
+    for ax, (land_cover, model) in zip(axs, product(LAND_COVERS, MODELS)):
+        x_column = f"{land_cover}{model}_0"
+        y_column = f"{land_cover}{model}_1"
+        pair = values[[x_column, y_column]].dropna()
+        if len(pair) < 2:
+            raise ValueError(f"{land_cover} {model} has fewer than two paired values.")
+
+        x = pair[x_column].to_numpy()
+        y = pair[y_column].to_numpy()
+        if np.ptp(x) == 0 or np.ptp(y) == 0:
+            raise ValueError(f"{land_cover} {model} contains a constant variable.")
+        correlation = float(np.corrcoef(x, y)[0, 1])
 
         ax.plot(
             limits,
             limits,
             color="black",
-            linewidth=0.7,
             linestyle="--",
-            alpha=0.65,
+            linewidth=0.7,
+            alpha=0.5,
             zorder=1,
         )
         ax.scatter(
             x,
             y,
-            s=2.2,
-            alpha=0.24,
+            s=2,
+            alpha=0.28,
             edgecolors="none",
             rasterized=True,
             zorder=2,
@@ -110,29 +108,28 @@ def main() -> None:
         ax.text(
             0.96,
             0.05,
-            rf"$r$ = {correlation:.2f}" + "\n" + rf"$n$ = {len(pair):,}",
-            transform="axes",
+            f"$r$ = {correlation:.3f}\n$n$ = {len(pair):,}",
+            transform=ax.transAxes,
             ha="right",
             va="bottom",
-            fontsize=6.5,
+            fontsize="small",
         )
 
     axs.format(
-        xlim=limits,
-        ylim=limits,
-        aspect=1,
-        xlabel="_0",
-        ylabel="_1",
-        toplabels=MODELS,
-        leftlabels=LAND_LABELS,
         abc="a.",
         abcloc="ul",
+        xlabel="_0",
+        ylabel="_1",
+        xlim=limits,
+        ylim=limits,
+        aspect="equal",
+        toplabels=MODELS,
+        leftlabels=tuple(name.capitalize() for name in LAND_COVERS),
     )
 
-    output_base = args.output_dir / "correlation_scatter"
-    fig.save(output_base.with_suffix(".pdf"), dpi=EXPORT_DPI)
-    fig.save(output_base.with_suffix(".png"), dpi=EXPORT_DPI)
-    uplt.close(fig)
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    fig.save(args.output_dir / f"{OUTPUT_STEM}.pdf", dpi=EXPORT_DPI)
+    fig.save(args.output_dir / f"{OUTPUT_STEM}.png", dpi=EXPORT_DPI)
 
 
 if __name__ == "__main__":
